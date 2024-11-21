@@ -399,27 +399,38 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         return outputs
 
     def parse_decoder_outputs(
-        self, input_decoder_output, text_separator, context_length, speech_pad_id=1001, speech_eos_id=1004
+        self, input_decoder_output, text_separator, context_length, speech_pad_id=1001, speech_eos_id=1004, text_pad_id=0,
     ):
         # remove text context
         max_len = input_decoder_output.shape[0]
         decoder_output = input_decoder_output[-1:].tile([max_len, 1])
         decoder_output[: max_len - context_length] = input_decoder_output[context_length:]
 
-        # Do not split because text and speech are now aligned
-        # Split text and speech part based on the position of the first separator token
-        # sep_pos = (decoder_output[:, 0] == text_separator).long()
-        # if torch.any(sep_pos):
-        #     first_sep_pos = torch.argmax(sep_pos)
-        #     text_tokens = decoder_output[:first_sep_pos, 0]
-        #     speech_tokens = decoder_output[first_sep_pos + 1 :, 1:]
-        # else:
-        #     text_tokens = decoder_output[:, 0]
-        #     speech_tokens = decoder_output[:, 1:]
-        text_tokens = decoder_output[:, 0]
-        speech_tokens = decoder_output[:, 1:]
+        text_channel = decoder_output[:, 0]
 
-        # import pdb; pdb.set_trace()
+        # adhoc: Suppose the text_pad_id appear before text_eos in the align_s2s case
+        sep_indices = (text_channel == text_separator).nonzero(as_tuple=True)[0]
+        index_sep = sep_indices[0].item() if sep_indices.numel() > 0 else None
+        pad_indices = (text_channel == text_pad_id).nonzero(as_tuple=True)[0]
+        index_pad = pad_indices[0].item() if pad_indices.numel() > 0 else None
+        is_align_s2s = index_pad is not None and (index_sep is None or index_pad < index_sep)
+        is_align_s2s = True
+        if is_align_s2s:
+            text_tokens_with_pads = decoder_output[:, 0]
+            text_tokens = text_tokens_with_pads[text_tokens_with_pads != text_pad_id]
+            speech_tokens = decoder_output[:, 1:]
+        else:
+            # s2s predicts [text, text_separator] for the first channel
+            sep_pos = (text_channel == text_separator).long()
+            is_s2s = torch.any(sep_pos)
+            if is_s2s:
+                first_sep_pos = torch.argmax(sep_pos)
+                text_tokens = decoder_output[:first_sep_pos, 0]
+                speech_tokens = decoder_output[first_sep_pos + 1 :, 1:]
+            else:
+                # direct_s2s
+                text_tokens = decoder_output[:, 0]
+                speech_tokens = decoder_output[:, 1:]
 
         # Get speech token ids
         n_speech_codebooks = self.model.n_proj_heads - 1
@@ -824,7 +835,6 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
     def de_concat_multiproj_logits(self, logits):
         logits_list = []
         prev = 0
-        # import pdb; pdb.set_trace()
         for i in self.model.proj_head_dims:
             logits_list.append(logits[:, prev : prev + i])
             prev += i
