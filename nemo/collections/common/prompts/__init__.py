@@ -10,3 +10,5 @@ from nemo.collections.common.prompts.phi2 import (
     Phi2CodePromptFormatter,
     Phi2QAPromptFormatter,
 )
+from nemo.collections.common.prompts.plain import PlainPromptFormatter
+from nemo.collections.common.prompts.t5nmt import T5NMTPromptFormatter

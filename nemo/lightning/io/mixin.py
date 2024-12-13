@@ -1,3 +1,17 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import inspect
 import json
@@ -48,7 +62,7 @@ def _ordered_arguments_with_default(data: config_lib.Config) -> Dict[Union[int, 
         )
 
     result["_target_"] = (
-        f"{inspect.getmodule(config_lib.get_callable(data)).__name__}.{config_lib.get_callable(data).__qualname__}"  # type: ignore
+        f"{inspect.getmodule(config_lib.get_callable(data)).__name__}" f".{config_lib.get_callable(data).__qualname__}"
     )
     if isinstance(data, partial.Partial):
         result["_partial_"] = True
@@ -64,6 +78,40 @@ def _config_representer_with_defaults(dumper, data, type_name="Config"):
 
 def _partial_representer_with_defaults(dumper, data):
     return _config_representer_with_defaults(dumper, data, type_name="Partial")
+
+
+def _safe_object_representer(dumper, data):
+    """
+    Represent a given object as YAML using the specified dumper.
+
+    This function is a fallback for objects that don't have specific representers.
+    If the object has __qualname__ attr,
+    the __target__ is set to f"{inspect.getmodule(obj).__name__}.{obj.__qualname__}".
+    If the object does not have a __qualname__ attr, the __target__ is set from its __class__ attr.
+    The __call__ key is used to indicate whether the target should be called to create an instance.
+
+    Args:
+        dumper (yaml.Dumper): The YAML dumper to use for serialization.
+        data (Any): The data to serialize. This can be any Python object,
+            but if it's a class or a class instance, special handling will be applied.
+
+    Returns:
+        str: The YAML representation of the data.
+    """
+    try:
+        obj = data
+        target = f"{inspect.getmodule(obj).__name__}.{obj.__qualname__}"
+        call = False
+    except AttributeError:
+        obj = data.__class__
+        target = f"{inspect.getmodule(obj).__name__}.{obj.__qualname__}"
+        call = True
+
+    value = {
+        "_target_": target,  # type: ignore
+        "_call_": call,
+    }
+    return dumper.represent_data(value)
 
 
 class IOMixin:
@@ -161,6 +209,7 @@ class IOMixin:
 
     @classmethod
     def io_artifacts(cls) -> List[Artifact]:
+        """Initialize io artifacts"""
         return []
 
     def io_dump(self, output: Path, yaml_attrs: list[str]):
@@ -208,14 +257,14 @@ class IOMixin:
         original_representers = yaml.SafeDumper.yaml_representers.copy()
 
         from nemo_run.config import Config, Partial
-        from nemo_run.core.serialization.yaml import YamlSerializer, _function_representer
+        from nemo_run.core.serialization.yaml import YamlSerializer
 
         yaml.SafeDumper.add_representer(config_lib.Config, _config_representer_with_defaults)
         yaml.SafeDumper.add_representer(partial.Partial, _partial_representer_with_defaults)
         yaml.SafeDumper.add_representer(Config, _config_representer_with_defaults)
         yaml.SafeDumper.add_representer(Partial, _partial_representer_with_defaults)
 
-        yaml.SafeDumper.add_multi_representer(object, _function_representer)
+        yaml.SafeDumper.add_multi_representer(object, _safe_object_representer)
 
         serializer = YamlSerializer()
         result = {}
@@ -397,7 +446,7 @@ class ConnectorMixin:
 
         connector = cls._IMPORTERS.get(str(cls) + ext) if importer else cls._EXPORTERS.get(str(cls) + ext)
         if not connector:
-            raise ValueError(f"No connector found for extension '{ext}'")
+            raise ValueError(f"No connector found for extension '{ext}' for {cls}")
 
         if not _path:
             if not connector.default_path:
@@ -561,7 +610,9 @@ def _io_flatten_object(instance):
 
 
 def _io_unflatten_object(values, metadata):
-    assert hasattr(_thread_local, "output_dir")
+    if not hasattr(_thread_local, "output_dir"):
+        return fdl.Config.__unflatten__(values, metadata)
+
     output_dir = _thread_local.output_dir
 
     if len(values) == 1:
@@ -636,14 +687,15 @@ def _artifact_transform_load(cfg: fdl.Config, path: Path):
             pass
 
 
-def load(path: Path, output_type: Type[CkptType] = Any, subpath: Optional[str] = None) -> CkptType:
+def load(path: Path, output_type: Type[CkptType] = Any, subpath: Optional[str] = None, build: bool = True) -> CkptType:
     """
     Loads a configuration from a pickle file and constructs an object of the specified type.
 
     Args:
         path (Path): The path to the pickle file or directory containing 'io.pkl'.
         output_type (Type[CkptType]): The type of the object to be constructed from the loaded data.
-        subpath (Optional[str]): Subpath to selectively load only specific objects inside the output_type. Defaults to None.
+        subpath (Optional[str]): Subpath to selectively load only specific objects inside the output_type.
+                                 Defaults to None.
 
     Returns
     -------
@@ -699,5 +751,8 @@ def load(path: Path, output_type: Type[CkptType] = Any, subpath: Optional[str] =
 
     config = serialization.Deserialization(json_config).result
     _artifact_transform_load(config, path)
+
+    if not build:
+        return config
 
     return fdl.build(config)
